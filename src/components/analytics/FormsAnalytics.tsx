@@ -187,6 +187,8 @@ export default function FormsAnalytics() {
   const [selectedTemplate, setSelectedTemplate] =
     useState<TemplateOption | null>(null);
 
+    const [actualResponseCounts, setActualResponseCounts] = useState<Record<string, number>>({});
+
   const templateOptions: TemplateOption[] = [
     {
       id: "flat",
@@ -291,6 +293,7 @@ export default function FormsAnalytics() {
       },
     },
   );
+ 
 
   const viewTypeMutation = useMutation(
     ({
@@ -350,6 +353,36 @@ export default function FormsAnalytics() {
     console.log("Visible forms:", filtered.map(f => ({ id: f._id, title: f.title })));
     return filtered;
   }, [forms, userRole, userPermissions]);
+  useEffect(() => {
+  const fetchAccurateCounts = async () => {
+    if (!visibleForms.length) return;
+    
+    const counts: Record<string, number> = {};
+    
+    for (const form of visibleForms) {
+      const formId = form._id || form.id;
+      if (!formId) continue;
+      
+      try {
+        // Get ALL responses including partial
+        const result = await apiClient.getFormResponses(formId, {
+          page: 1,
+          limit: 1,
+          includePartial: true,  // ✅ This is the key
+          analytics: true
+        });
+        counts[formId] = result.pagination?.totalResponses || 0;
+      } catch {
+        // Fallback to the existing count if API fails
+        counts[formId] = form.responseCount || 0;
+      }
+    }
+    
+    setActualResponseCounts(counts);
+  };
+  
+  fetchAccurateCounts();
+}, [visibleForms]);
 
   const totalForms = visibleForms.filter((form: FormItem) => !form.parentFormId).length;
   const activeFormsCount = visibleForms.filter(
@@ -771,6 +804,16 @@ export default function FormsAnalytics() {
     }
   };
 
+  useEffect(() => {
+  if (formsData?.forms) {
+    console.log("📊 Forms data with response counts:", formsData.forms.map(f => ({
+      title: f.title,
+      _id: f._id,
+      responseCount: f.responseCount,
+      hasResponseCount: 'responseCount' in f
+    })));
+  }
+}, [formsData]);
   const openAutoSendModal = (formId: string) => {
     const form = forms.find((f) => f.id === formId || f._id === formId);
     if (form) {
@@ -1084,7 +1127,8 @@ export default function FormsAnalytics() {
             if (!parent) return null;
 
             const formId = parent._id || parent.id;
-            const responseCount = parent.responseCount || 0;
+           const responseCount = actualResponseCounts[formId] || parent.responseCount || 0;
+
             const isLocationEnabled = parent.locationEnabled !== false;
 
             // Check if user can view this specific form

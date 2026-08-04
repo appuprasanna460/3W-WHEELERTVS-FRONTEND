@@ -864,56 +864,66 @@ class ApiClient {
     return this.request<{ response: any }>(`/responses/${id}`);
   }
 
-  async createResponse(responseData: any) {
-    const tenantSlug = responseData.tenantSlug;
-    const formId = responseData.questionId || responseData.formId;
-
-    let url = `${this.baseUrl}/responses`;
-    if (tenantSlug && formId) {
-      url = `${this.baseUrl}/responses/${tenantSlug}/forms/${formId}/responses`;
-    }
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (this.token) headers.Authorization = `Bearer ${this.token}`;
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
-
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(responseData),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-      const json = await res.json();
-
-      if (!res.ok) {
-        throw new ApiError(
-          res.status,
-          json,
-          json.message || "Failed to create response",
-        );
-      }
-
-      return json;
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      if (err.name === "AbortError") {
-        throw new ApiError(
-          408,
-          null,
-          "Request timed out. The server took too long to respond.",
-        );
-      }
-      if (err instanceof ApiError) throw err;
-      throw new ApiError(500, null, err.message || "Failed to create response");
-    }
+ // In client.ts - replace the createResponse method
+async createResponse(
+  tenantSlug: string,
+  formId: string,
+  responseData: any
+) {
+  // Build the URL with tenant slug and form ID in the path
+  const url = `${this.baseUrl}/responses/${tenantSlug}/forms/${formId}/responses`;
+  
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-App-Type": "website",
+  };
+  
+  if (this.token) {
+    headers.Authorization = `Bearer ${this.token}`;
   }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(responseData),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+    const json = await res.json();
+
+    if (!res.ok) {
+      throw new ApiError(
+        res.status,
+        json,
+        json.message || "Failed to create response",
+      );
+    }
+
+    // The backend returns { success, message, data }
+    // But we want to return the data directly for consistency
+    if (json.success && json.data) {
+      return json.data;
+    }
+    
+    return json;
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err.name === "AbortError") {
+      throw new ApiError(
+        408,
+        null,
+        "Request timed out. The server took too long to respond.",
+      );
+    }
+    if (err instanceof ApiError) throw err;
+    throw new ApiError(500, null, err.message || "Failed to create response");
+  }
+}
 
   async batchImportResponses(batchData: any) {
     return this.request<any>("/responses/batch/import", {

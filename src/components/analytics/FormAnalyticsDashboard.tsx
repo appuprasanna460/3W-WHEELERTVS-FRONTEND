@@ -127,6 +127,8 @@ interface Response {
   createdBy?: string;
   isDispatched?: boolean;
   dispatchedAt?: string;
+  dispatchedBy?: string;
+  dispatchedByName?: string;
   tenantId?: string;
   submittedBy?: string;
   timeSpent?: number;
@@ -2614,6 +2616,33 @@ export default function FormAnalyticsDashboard() {
       (creatorIdStr && creatorIdStr === userIdStr)
     );
   };
+  const isOwnTenantResponse = (response: Response) => {
+    // Only superadmin has global (cross-tenant) access.
+    // Regular admins must still match the response's tenant.
+    if (user?.role === "superadmin") {
+      return true;
+    }
+
+    const userTenantId = user?.tenantId;
+    if (!userTenantId) {
+      return false;
+    }
+
+    const responseTenantId = response.tenantId;
+    if (!responseTenantId) {
+      return true; // legacy data with no tenant — allow
+    }
+
+    const userTenantStr = typeof userTenantId === 'object'
+      ? String((userTenantId as any)?._id || (userTenantId as any)?.id || userTenantId)
+      : String(userTenantId);
+
+    const responseTenantStr = typeof responseTenantId === 'object'
+      ? String((responseTenantId as any)?._id || (responseTenantId as any)?.id || responseTenantId)
+      : String(responseTenantId);
+
+    return userTenantStr === responseTenantStr;
+  };
 
   // BIW Review: any reviewer other than the submitter can mark a response as
   // Accepted / Rejected / Reworked from the Responses table. Selecting one
@@ -3001,6 +3030,32 @@ export default function FormAnalyticsDashboard() {
     startDate: string;
     endDate: string;
   }>({ type: "all", startDate: "", endDate: "" });
+
+  const [hasUserAppliedDateFilter, setHasUserAppliedDateFilter] =
+    useState(false);
+
+  useEffect(() => {
+    if (hasUserAppliedDateFilter) return; // user is in control now, don't override
+
+    if (analyticsView === "dashboard") {
+      const end = new Date();
+      const start = new Date();
+      start.setDate(start.getDate() - 29); // last 30 days, inclusive of today
+      setDateFilter({
+        type: "range",
+        startDate: start.toISOString().split("T")[0],
+        endDate: end.toISOString().split("T")[0],
+      });
+    } else {
+      setDateFilter({ type: "all", startDate: "", endDate: "" });
+    }
+  }, [analyticsView, hasUserAppliedDateFilter]);
+
+
+
+
+
+
   const [locationFilter, setLocationFilter] = useState<string[]>([]);
   const [columnFilters, setColumnFilters] = useState<
     Record<string, string[] | null>
@@ -3236,6 +3291,29 @@ export default function FormAnalyticsDashboard() {
     }
     return null;
   }, [form, user]);
+
+  // Check if the current user belongs to the same tenant as the form.
+  // Dispatch enable (bulk select) should only be available for own-tenant users,
+  // not for cross-tenant users viewing shared/cross-tenant forms.
+  const isOwnTenantForm = useMemo(() => {
+    if (user?.role === "superadmin") return true;
+    const formTenantId = form?.tenantId
+      ? typeof form.tenantId === "object"
+        ? (form.tenantId as { _id?: string })._id
+        : form.tenantId
+      : null;
+    const userTenantIdRaw = user?.tenantId as any;
+    const userTenantId = userTenantIdRaw
+      ? typeof userTenantIdRaw === "object"
+        ? userTenantIdRaw._id
+        : userTenantIdRaw
+      : null;
+    // If the form has no tenant, treat as own tenant (legacy behavior).
+    return !formTenantId || (userTenantId && formTenantId.toString() === userTenantId.toString());
+  }, [form, user]);
+
+  // Dispatch bulk-select is only allowed for same-tenant admins.
+  const canBulkDispatchResponses = canBulkSelectResponses && isOwnTenantForm;
   const handleReviewSubmit = async (
     responseId: string,
     reviewOption: string,
@@ -6488,13 +6566,13 @@ export default function FormAnalyticsDashboard() {
   const DirectAcceptedPerformanceGraph = () => {
     const timeData = useMemo(() => {
       return computeDirectAcceptedDailyStats(
-        baseFilteredResponses,
+        dateFilteredResponses,
         responseStatuses,
         dateFilter.startDate,
         dateFilter.endDate,
       );
     }, [
-      baseFilteredResponses,
+      dateFilteredResponses,
       responseStatuses,
       dateFilter.startDate,
       dateFilter.endDate,
@@ -6638,11 +6716,11 @@ export default function FormAnalyticsDashboard() {
     const timeData = useMemo(() => {
       return computeDailyReworkVolumeStats(
         form,
-        baseFilteredResponses,
+        dateFilteredResponses,
         dateFilter.startDate,
         dateFilter.endDate,
       );
-    }, [form, baseFilteredResponses, dateFilter.startDate, dateFilter.endDate]);
+    }, [form, dateFilteredResponses, dateFilter.startDate, dateFilter.endDate]);
 
     if (timeData.length === 0) return null;
 
@@ -8094,23 +8172,25 @@ export default function FormAnalyticsDashboard() {
     );
   }
 
-  // Helper calculations for Bulk Dispatch
   const dispatchableResponses = filteredResponses.filter(response => {
+    if (!isOwnTenantResponse(response)) return false; // exclude cross-tenant
+
     const status = responseStatuses[response.id] || "";
     return status === "Direct Ok" ||
       status === "Rework Accepted" ||
       status === "Rework Completed" ||
       status === "Accepted";
   });
-
   const pendingDispatchResponses = dispatchableResponses.filter(response => !response.isDispatched);
 
   const isAllDispatchableSelected = dispatchableResponses.length > 0 && selectedDispatchIds.length === pendingDispatchResponses.length && pendingDispatchResponses.length > 0;
 
   const handleHeaderDispatchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.checked) {
-      if (pendingDispatchResponses.length === 0) return;
-      setSelectedDispatchIds(pendingDispatchResponses.map(r => r.id));
+      const selectableIds = pendingDispatchResponses
+        .filter(r => isOwnTenantResponse(r))
+        .map(r => r.id);
+      setSelectedDispatchIds(selectableIds);
     } else {
       setSelectedDispatchIds([]);
     }
@@ -8119,27 +8199,25 @@ export default function FormAnalyticsDashboard() {
   const handleExecuteBulkDispatch = async () => {
     setIsBulkDispatching(true);
     try {
+      const dispatchedAt = new Date().toISOString();
+      const dispatchUpdatePayload = {
+        isDispatched: true,
+        dispatchedAt,
+        dispatchedBy: user?._id || user?.id,
+        dispatchedByName: user?.name || user?.username,
+      };
+
       await Promise.all(
         selectedDispatchIds.map(id =>
-          apiClient.updateResponse(id, { isDispatched: true })
+          apiClient.updateResponse(id, dispatchUpdatePayload)
         )
       );
 
-      const dispatchedAt = new Date().toISOString();
-
-      // Update local state to reflect change immediately
-      setResponses((prev) =>
-        prev.map((r) =>
-          selectedDispatchIds.includes(r.id)
-            ? { ...r, isDispatched: true, dispatchedAt }
-            : r
-        )
-      );
-
-      // The Responses tab table renders from `tableResponses` (server-paginated),
-      // not `responses` — update it too so the UI reflects the dispatch
-      // immediately without needing a manual page reload.
-
+      // filteredResponses is derived via useMemo from `responses` — updating
+      // `responses` here is enough, filteredResponses recomputes automatically.
+      setResponses(currentResponses => currentResponses.map(r =>
+        selectedDispatchIds.includes(r.id) ? { ...r, ...dispatchUpdatePayload } : r
+      ));
 
       setSelectedDispatchIds([]);
       setShowBulkDispatchConfirm(false);
@@ -8390,7 +8468,7 @@ export default function FormAnalyticsDashboard() {
                         Response Trend
                       </h3>
                       <p className="text-xs text-primary-500 dark:text-primary-400">
-                        Last 7 days
+                        Last 30 days
                       </p>
                     </div>
                   </div>
@@ -10065,7 +10143,7 @@ export default function FormAnalyticsDashboard() {
                             <th className="sticky left-0 sm:left-12 z-30 text-center px-4 py-3 font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider border border-gray-200 dark:border-gray-700 whitespace-nowrap bg-gray-100 dark:bg-gray-800 min-w-[120px]">
                               <span>Actions</span>
                             </th>
-                            <th className="text-center px-6 py-3 ... min-w-24 whitespace-nowrap bg-gray-100 dark:bg-gray-800">
+                            <th className="text-center px-6 py-3 ...">
                               <div className="flex flex-col items-center gap-1.5 justify-center">
                                 <span>Dispatch</span>
                                 {canBulkSelectResponses && (
@@ -10397,72 +10475,55 @@ export default function FormAnalyticsDashboard() {
                                       )}
                                     </div>
                                   </td>
-                                  <td
-                                    className={`px-3 py-3 text-center border border-gray-200 dark:border-gray-700 whitespace-nowrap ${editingResponseId === response.id ? "bg-blue-50 dark:bg-blue-900/20" : idx % 2 === 0 ? "bg-white dark:bg-gray-900" : "bg-gray-50 dark:bg-gray-800"}`}
-                                  >
-                                    {/* Dispatch cell content */}
+                                  <td className="px-3 py-3 text-center border border-gray-200 dark:border-gray-700 whitespace-nowrap">
                                     {(() => {
-                                      const status =
-                                        responseStatuses[response.id] || "";
-                                      const canShowDispatch =
-                                        status === "Direct Ok" ||
+                                      const status = responseStatuses[response.id] || "";
+
+                                      // 1️⃣ Check if response is eligible for dispatch based on status
+                                      const canShowDispatch = status === "Direct Ok" ||
                                         status === "Rework Accepted" ||
                                         status === "Rework Completed" ||
                                         status === "Accepted";
-                                      // Check submitter based on email/username like other parts of the code
-                                      const userEmail = user?.email || "";
-                                      const userUsername = user?.username || "";
-                                      const userIdStr = user?._id
-                                        ? String(user._id)
-                                        : user?.id
-                                          ? String(user.id)
-                                          : "";
-                                      const creatorId =
-                                        typeof response.createdBy === "object"
-                                          ? (response.createdBy as any)?._id ||
-                                          (response.createdBy as any)?.id
-                                          : response.createdBy;
-                                      const creatorIdStr = creatorId
-                                        ? String(creatorId)
-                                        : "";
 
-                                      const isSubmitter =
-                                        response.submittedBy === userEmail ||
-                                        response.submittedBy === userUsername ||
-                                        response.createdBy === userEmail ||
-                                        response.createdBy === userUsername ||
-                                        response.submitterContact?.email ===
-                                        userEmail ||
-                                        (creatorIdStr &&
-                                          creatorIdStr === userIdStr);
+                                      // 2️⃣ Use the tenant check function
+                                      const isSameTenant = isOwnTenantResponse(response);
 
+                                      // ❌ Not eligible based on status
                                       if (!canShowDispatch) {
-                                        return (
-                                          <span className="text-gray-400 text-xs">
-                                            -
-                                          </span>
-                                        );
+                                        return <span className="text-gray-400 text-xs">-</span>;
                                       }
 
-                                      // Show enabled state for all users once dispatch is enabled
+                                      // ✅ Already dispatched - show read-only badge
                                       if (response.isDispatched) {
+                                        const dispatchDate = response.dispatchedAt ? new Date(response.dispatchedAt) : null;
                                         return (
-                                          <div className="flex items-center justify-center">
-                                            <input
-                                              type="checkbox"
-                                              checked={true}
-                                              disabled={true}
-                                              className="w-4 h-4 text-green-600 border-gray-300 dark:border-gray-600 rounded accent-green-600 opacity-60"
-                                              title="Dispatch enabled"
-                                            />
-                                            <span className="ml-2 text-xs text-green-600 font-medium">
-                                              Enabled
-                                            </span>
+                                          <div className="flex flex-col items-center justify-center text-xs text-center gap-0.5">
+                                            <div className="flex items-center text-green-600 font-medium">
+                                              <CheckCircle className="w-3.5 h-3.5 mr-1" />
+                                              <span>Enabled</span>
+                                            </div>
+                                            {response.dispatchedByName ? (
+                                              <span className="text-gray-600 dark:text-gray-300 text-[10px] font-semibold whitespace-nowrap">
+                                                {response.dispatchedByName}
+                                              </span>
+                                            ) : (
+                                              <span className="text-gray-400 text-[10px] italic">Unknown user</span>
+                                            )}
+                                            {dispatchDate && (
+                                              <span className="text-gray-400 text-[9px] whitespace-nowrap">
+                                                {dispatchDate.toLocaleDateString()} · {dispatchDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                              </span>
+                                            )}
                                           </div>
                                         );
                                       }
 
-                                      // Only show interactive checkbox for the submitter
+                                      // 🔒 CROSS-TENANT: Show dash (NO CHECKBOX)
+                                      if (!isSameTenant) {
+                                        return <span className="text-gray-400 text-xs">-</span>;
+                                      }
+
+                                      // ✅ SAME TENANT: Show checkbox
                                       return (
                                         <input
                                           type="checkbox"
@@ -10476,7 +10537,7 @@ export default function FormAnalyticsDashboard() {
                                               setSelectedDispatchIds(prev => prev.filter(id => id !== response.id));
                                             }
                                           }}
-                                          className="w-4 h-4 text-green-600 border-gray-300 dark:border-gray-600 rounded cursor-pointer accent-green-600"
+                                          className="w-4 h-4 text-green-600 border-gray-300 dark:border-gray-600 rounded cursor-pointer accent-green-600 disabled:opacity-50 disabled:cursor-not-allowed"
                                           title="Select for dispatch"
                                         />
                                       );
@@ -10572,26 +10633,35 @@ export default function FormAnalyticsDashboard() {
                                   </td>
                                   <td className="px-6 py-3 text-sm border border-gray-200 dark:border-gray-700 min-w-48 whitespace-nowrap bg-gray-50/50 dark:bg-gray-800/30">
                                     {(() => {
-                                      const reviewObj =
-                                        (response as any).review ||
-                                        (reviewedBy[response.id]
-                                          ? {
-                                            status:
-                                              reviewedBy[response.id]
-                                                ?.option ||
-                                              reviewedBy[response.id]?.status,
-                                            reviewer:
-                                              reviewedBy[response.id]?.name ||
-                                              reviewedBy[response.id]
-                                                ?.reviewer ||
-                                              "Reviewer",
-                                            flaggedQuestions:
-                                              reviewedBy[response.id]
-                                                ?.flaggedQuestions || [],
-                                          }
-                                          : null);
+                                      const localReview = reviewedBy[response.id];
+                                      const legacyServerReview = (response as any).review;
+
+                                      let reviewObj: {
+                                        status: any;
+                                        reviewer: any;
+                                        flaggedQuestions: any[];
+                                      } | null = null;
+
+                                      if (localReview) {
+                                        reviewObj = {
+                                          status: localReview.option || localReview.status,
+                                          reviewer: localReview.reviewer || localReview.name,
+                                          flaggedQuestions: localReview.flaggedQuestions || [],
+                                        };
+                                      } else if (legacyServerReview) {
+                                        reviewObj = {
+                                          status: legacyServerReview.status,
+                                          reviewer: legacyServerReview.reviewer || legacyServerReview.name,
+                                          flaggedQuestions: legacyServerReview.flaggedQuestions || [],
+                                        };
+                                      }
+
+                                      if (reviewObj && !reviewObj.reviewer) {
+                                        reviewObj.reviewer = "Reviewer";
+                                      }
 
                                       return reviewObj ? (
+
                                         <div className="flex flex-col gap-1">
                                           <div className="flex items-center gap-2">
                                             <span
@@ -10949,6 +11019,7 @@ export default function FormAnalyticsDashboard() {
         }
         responses={responses}
         onApplyFilters={(filters) => {
+          setHasUserAppliedDateFilter(true); // user has taken explicit control of filtering
           const { dates, locations, ...questionFilters } = filters as any;
 
           // ✅ Build applied filters array for display

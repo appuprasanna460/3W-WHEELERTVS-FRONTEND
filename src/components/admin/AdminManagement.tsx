@@ -1936,10 +1936,10 @@ export default function AdminManagement() {
                           <Trash2 className="w-6 h-6 text-red-600 dark:text-red-400" />
                         </div>
                         <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100 mb-2">
-                          Delete Administrator?
+                          Delete User?
                         </h3>
                         <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
-                          This will permanently delete the administrator. This action cannot be undone.
+                          This will permanently delete the User. This action cannot be undone.
                         </p>
                         <div className="flex gap-3">
                           <button

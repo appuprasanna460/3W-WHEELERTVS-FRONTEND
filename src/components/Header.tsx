@@ -102,16 +102,16 @@ export default function Header() {
   const visibleForms = React.useMemo(() => {
     if (!isAuthenticated || !user) return [];
     const forms = formsData?.forms || [];
-    
+
     return forms.filter((form: any) => {
       const formId = form._id || form.id;
       if (!formId) return false;
-      
+
       // Admins and superadmins see all forms
       if (user.role === 'admin' || user.role === 'superadmin') {
         return true;
       }
-      
+
       // For inspector/subadmin, check if they have ANY analytics permission for this form
       const subTypes = ['response', 'dashboard', 'overall', 'questions', 'sections'];
       for (const subType of subTypes) {
@@ -136,7 +136,7 @@ export default function Header() {
       return tabs;
     }
 
-    return tabs.filter(tab => 
+    return tabs.filter(tab =>
       permissionSet.has(`analytics:form:${formId}:${tab.subType}`)
     );
   }, [user, permissionSet]);
@@ -713,26 +713,45 @@ export default function Header() {
                 if (item.title === "Service Analytics") {
                   return (
                     <div key={item.title} className="flex flex-col space-y-1">
-                      <button
-                        onClick={() => {
-                          setMobileActiveDropdown(isExpanded ? null : "Service Analytics");
-                          setMobileActiveFormId(null);
-                        }}
+                      <div
                         className={`
-                          flex items-center justify-between px-4 py-3 rounded-lg text-sm font-medium transition-colors duration-200
-                          ${isExpanded
-                            ? "bg-primary-50 text-primary-700 dark:bg-primary-900/20 dark:text-primary-400"
-                            : "text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
-                          }
-                        `}
+          flex items-center justify-between px-4 py-3 rounded-lg
+          ${isExpanded
+                            ? "bg-primary-50 dark:bg-primary-900/20"
+                            : "hover:bg-gray-50 dark:hover:bg-gray-800"}
+        `}
                       >
-                        <div className="flex items-center">
+                        {/* ✅ Left Side - Navigate to /forms/analytics (same as desktop) */}
+                        <Link
+                          to="/forms/analytics"
+                          onClick={() => {
+                            closeMobile();
+                          }}
+                          className="flex items-center flex-1 text-left"
+                        >
                           <Icon className="w-5 h-5 mr-3" />
-                          {item.title}
-                        </div>
-                        <ChevronRight className={`w-4 h-4 transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`} />
-                      </button>
+                          <span>{item.title}</span>
+                        </Link>
 
+                        {/* ✅ Right Side - Expand/Collapse (same as desktop hover) */}
+                        <button
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setMobileActiveDropdown(
+                              isExpanded ? null : "Service Analytics"
+                            );
+                            setMobileActiveFormId(null);
+                          }}
+                          className="p-1"
+                        >
+                          <ChevronRight
+                            className={`w-4 h-4 transition-transform duration-200 ${isExpanded ? "rotate-90" : ""}`}
+                          />
+                        </button>
+                      </div>
+
+                      {/* ✅ Expanded Form List (same as desktop dropdown) */}
                       {isExpanded && (
                         <div className="pl-6 flex flex-col space-y-1 mt-1 border-l-2 border-gray-100 dark:border-gray-800 ml-4">
                           {visibleForms.length === 0 ? (
@@ -748,42 +767,39 @@ export default function Header() {
                               return (
                                 <div key={formId} className="flex flex-col space-y-1">
                                   <button
-                                    onClick={() => setMobileActiveFormId(isFormExpanded ? null : formId)}
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      setMobileActiveFormId(isFormExpanded ? null : formId);
+                                    }}
                                     className={`
-                                      flex items-center justify-between pl-4 pr-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200
-                                      ${isFormExpanded
+                      flex items-center justify-between pl-4 pr-4 py-2 rounded-lg text-sm font-medium transition-colors duration-200
+                      ${isFormExpanded
                                         ? "text-primary-700 dark:text-primary-400 bg-gray-50 dark:bg-gray-800/40"
                                         : "text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
                                       }
-                                    `}
+                    `}
                                   >
                                     <span className="truncate pr-2 text-left">{form.title}</span>
                                     {allowedTabs.length > 0 && (
-                                      <ChevronRight className={`w-4 h-4 flex-shrink-0 transition-transform duration-200 ${isFormExpanded ? 'rotate-90' : ''}`} />
+                                      <ChevronRight className={`w-4 h-4 transition-transform duration-200 ${isFormExpanded ? 'rotate-90' : ''}`} />
                                     )}
                                   </button>
 
                                   {isFormExpanded && allowedTabs.length > 0 && (
                                     <div className="pl-8 flex flex-col space-y-1 mt-1 border-l border-gray-100 dark:border-gray-800 ml-4">
-                                      {allowedTabs.map((tab) => {
-                                        const isTabActive = location.pathname === `/forms/${formId}/analytics` && new URLSearchParams(location.search).get("tab") === tab.key;
-                                        return (
-                                          <Link
-                                            key={tab.key}
-                                            to={`/forms/${formId}/analytics?tab=${tab.key}`}
-                                            onClick={closeMobile}
-                                            className={`
-                                              block py-2 text-sm transition-colors duration-200
-                                              ${isTabActive
-                                                ? "text-primary-700 font-bold dark:text-primary-400"
-                                                : "text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white"
-                                              }
-                                            `}
-                                          >
-                                            {tab.name}
-                                          </Link>
-                                        );
-                                      })}
+                                      {allowedTabs.map((tab) => (
+                                        <Link
+                                          key={tab.key}
+                                          to={`/forms/${formId}/analytics?tab=${tab.key}`}
+                                          onClick={() => {
+                                            closeMobile();
+                                          }}
+                                          className="block py-2 text-sm text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white"
+                                        >
+                                          {tab.name}
+                                        </Link>
+                                      ))}
                                     </div>
                                   )}
                                 </div>
@@ -795,7 +811,6 @@ export default function Header() {
                     </div>
                   );
                 }
-
                 if (hasChildren) {
                   return (
                     <div key={item.title} className="flex flex-col space-y-1">

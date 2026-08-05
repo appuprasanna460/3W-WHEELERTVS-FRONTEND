@@ -3741,101 +3741,101 @@ export default function FormAnalyticsDashboard() {
 
 
 
+  const fetchData = async () => {
+    console.log(
+      "[ANALYTICS] fetchData called with ID:",
+      id,
+      "isGuest:",
+      isGuest,
+    );
+    if (!id) return;
 
-  useEffect(() => {
-    const fetchData = async () => {
-      console.log(
-        "[ANALYTICS] fetchData called with ID:",
-        id,
-        "isGuest:",
-        isGuest,
-      );
-      if (!id) return;
+    // Guest access check
+    if (isGuest) {
+      const guestToken = localStorage.getItem("guest_auth_token");
+      const guestFormId = localStorage.getItem("guest_form_id");
+      const guestExpiresAt = localStorage.getItem("guest_expires_at");
 
-      // Guest access check
-      if (isGuest) {
-        const guestToken = localStorage.getItem("guest_auth_token");
-        const guestFormId = localStorage.getItem("guest_form_id");
-        const guestExpiresAt = localStorage.getItem("guest_expires_at");
+      const isExpired = guestExpiresAt
+        ? new Date() > new Date(guestExpiresAt)
+        : true;
 
-        const isExpired = guestExpiresAt
-          ? new Date() > new Date(guestExpiresAt)
-          : true;
-
-        if (!guestToken || guestFormId !== id || isExpired) {
-          localStorage.removeItem("guest_auth_token");
-          localStorage.removeItem("guest_email");
-          localStorage.removeItem("guest_form_id");
-          localStorage.removeItem("guest_expires_at");
-          navigate(`/forms/${id}/analytics/login`);
-          return;
-        }
+      if (!guestToken || guestFormId !== id || isExpired) {
+        localStorage.removeItem("guest_auth_token");
+        localStorage.removeItem("guest_email");
+        localStorage.removeItem("guest_form_id");
+        localStorage.removeItem("guest_expires_at");
+        navigate(`/forms/${id}/analytics/login`);
+        return;
       }
+    }
 
-      try {
-        setLoading(true);
-        setError(null); // Clear any previous errors
+    try {
+      setLoading(true);
+      setError(null); // Clear any previous errors
 
-        const formCacheKey = `/forms/${id}`;
-        const responsesCacheKey = `/responses/form/${id}?page=1&limit=5000&analytics=true`;
+      const formCacheKey = `/forms/${id}`;
+      const responsesCacheKey = `/responses/form/${id}?page=1&limit=5000&analytics=true`;
 
-        const isFormFresh = apiClient.isCacheFresh(formCacheKey, 30);
-        const isResponsesFresh = apiClient.isCacheFresh(responsesCacheKey, 30);
+      const isFormFresh = apiClient.isCacheFresh(formCacheKey, 30);
+      const isResponsesFresh = apiClient.isCacheFresh(responsesCacheKey, 30);
 
-        if (isFormFresh && isResponsesFresh) {
-          console.log("[ANALYTICS DEBUG] Cache is fresh (<30s). Skipping background API calls.");
-          setLoading(false);
-          return;
-        }
-
-        console.log("[ANALYTICS DEBUG] Fetching form:", id);
-
-        // Fetch form details with longer timeout
-        const formData = await apiClient.request<{ form: any }>(formCacheKey, {
-          forceNetwork: true,
-          timeout: 60000 // 60 seconds for form data
-        });
-        setForm(formData.form);
-
-        console.log("[ANALYTICS DEBUG] Form fetched:", formData.form?.title);
-
-        if (formData.form?.sections && formData.form.sections.length > 0) {
-          setSelectedResponsesSectionIds(
-            formData.form.sections.map((s: Section) => s.id),
-          );
-        }
-
-        // Fetch ALL responses with longer timeout
-        const responsesData = await apiClient.getAllFormResponses(id, {
-          analytics: true,
-          forceNetwork: true
-        });
-        console.log(
-          "[ANALYTICS DEBUG] Responses fetched:",
-          responsesData.responses?.length || 0,
-        );
-        setResponses(responsesData.responses || []);
-
-        // Reset retry count on success
-        setRetryCount(0);
-
-      } catch (err) {
-        console.error("Error fetching analytics data:", err);
-
-        // Better error messaging for timeouts
-        let errorMessage = "Failed to load analytics";
-        if (err instanceof Error) {
-          if (err.message?.includes('timeout') || err.name === 'AbortError') {
-            errorMessage = 'The data is taking too long to load. This might be due to a large dataset or server load. Please try again.';
-          } else {
-            errorMessage = err.message;
-          }
-        }
-        setError(errorMessage);
-      } finally {
+      if (isFormFresh && isResponsesFresh) {
+        console.log("[ANALYTICS DEBUG] Cache is fresh (<30s). Skipping background API calls.");
         setLoading(false);
+        return;
       }
-    };
+
+      console.log("[ANALYTICS DEBUG] Fetching form:", id);
+
+      // Fetch form details with longer timeout
+      const formData = await apiClient.request<{ form: any }>(formCacheKey, {
+        forceNetwork: true,
+        timeout: 60000 // 60 seconds for form data
+      });
+      setForm(formData.form);
+
+      console.log("[ANALYTICS DEBUG] Form fetched:", formData.form?.title);
+
+      if (formData.form?.sections && formData.form.sections.length > 0) {
+        setSelectedResponsesSectionIds(
+          formData.form.sections.map((s: Section) => s.id),
+        );
+      }
+
+      // Fetch ALL responses with longer timeout
+      const responsesData = await apiClient.getAllFormResponses(id, {
+        analytics: true,
+        forceNetwork: true
+      });
+      console.log(
+        "[ANALYTICS DEBUG] Responses fetched:",
+        responsesData.responses?.length || 0,
+      );
+      setResponses(responsesData.responses || []);
+
+      // Reset retry count on success
+      setRetryCount(0);
+
+    } catch (err) {
+      console.error("Error fetching analytics data:", err);
+
+      // Better error messaging for timeouts
+      let errorMessage = "Failed to load analytics";
+      if (err instanceof Error) {
+        if (err.message?.includes('timeout') || err.name === 'AbortError') {
+          errorMessage = 'The data is taking too long to load. This might be due to a large dataset or server load. Please try again.';
+        } else {
+          errorMessage = err.message;
+        }
+      }
+      setError(errorMessage);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+
 
     fetchData();
 
@@ -3845,7 +3845,7 @@ export default function FormAnalyticsDashboard() {
     setIsRetrying(true);
     setRetryCount(prev => prev + 1);
     try {
-      await fetchData();
+      await fetchData(); // ❌ fetchData is not defined here
     } catch (error) {
       console.error("Retry failed:", error);
     } finally {

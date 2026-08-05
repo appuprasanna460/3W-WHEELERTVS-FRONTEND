@@ -3845,7 +3845,7 @@ export default function FormAnalyticsDashboard() {
     setIsRetrying(true);
     setRetryCount(prev => prev + 1);
     try {
-      await fetchData(); // ❌ fetchData is not defined here
+      await fetchData();
     } catch (error) {
       console.error("Retry failed:", error);
     } finally {

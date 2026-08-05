@@ -2457,6 +2457,9 @@ export default function FormAnalyticsDashboard() {
     }
   };
 
+  const [retryCount, setRetryCount] = useState(0);
+  const [isRetrying, setIsRetrying] = useState(false);
+
   const handleAutoSendSetup = () => {
     if (id) {
       setAutoSendModal({
@@ -3143,7 +3146,6 @@ export default function FormAnalyticsDashboard() {
 
 
 
-  // Fetch performance table data
   useEffect(() => {
     const fetchPerformanceTable = async () => {
       if (!id || (user?.role !== "admin" && user?.role !== "superadmin"))
@@ -3161,6 +3163,10 @@ export default function FormAnalyticsDashboard() {
         }
       } catch (error) {
         console.error("Error fetching performance table:", error);
+        // Don't show error toast for performance table - it's not critical
+        if (error instanceof Error && !error.message?.includes('timeout')) {
+          showToast("Failed to load performance data", "error");
+        }
       } finally {
         setPerformanceTableLoading(false);
       }
@@ -3731,6 +3737,11 @@ export default function FormAnalyticsDashboard() {
     return Object.values(groups);
   }, [filteredInspectorSummary]);
 
+
+
+
+
+
   useEffect(() => {
     const fetchData = async () => {
       console.log(
@@ -3752,7 +3763,6 @@ export default function FormAnalyticsDashboard() {
           : true;
 
         if (!guestToken || guestFormId !== id || isExpired) {
-          // Clear expired or invalid guest session
           localStorage.removeItem("guest_auth_token");
           localStorage.removeItem("guest_email");
           localStorage.removeItem("guest_form_id");
@@ -3764,6 +3774,8 @@ export default function FormAnalyticsDashboard() {
 
       try {
         setLoading(true);
+        setError(null); // Clear any previous errors
+
         const formCacheKey = `/forms/${id}`;
         const responsesCacheKey = `/responses/form/${id}?page=1&limit=5000&analytics=true`;
 
@@ -3778,23 +3790,22 @@ export default function FormAnalyticsDashboard() {
 
         console.log("[ANALYTICS DEBUG] Fetching form:", id);
 
-        // Fetch form details
-        const formData = await apiClient.request<{ form: any }>(formCacheKey, { forceNetwork: true });
+        // Fetch form details with longer timeout
+        const formData = await apiClient.request<{ form: any }>(formCacheKey, {
+          forceNetwork: true,
+          timeout: 60000 // 60 seconds for form data
+        });
         setForm(formData.form);
 
         console.log("[ANALYTICS DEBUG] Form fetched:", formData.form?.title);
 
-        // Initialize selected sections for responses view - select all by default
         if (formData.form?.sections && formData.form.sections.length > 0) {
           setSelectedResponsesSectionIds(
             formData.form.sections.map((s: Section) => s.id),
           );
         }
 
-        // Fetch ALL responses for this form — the analytics below (section
-        // stats, question performance, charts, etc.) need the complete
-        // dataset to be accurate, not a single page. getAllFormResponses
-        // pages through the backend internally and returns everything.
+        // Fetch ALL responses with longer timeout
         const responsesData = await apiClient.getAllFormResponses(id, {
           analytics: true,
           forceNetwork: true
@@ -3804,19 +3815,43 @@ export default function FormAnalyticsDashboard() {
           responsesData.responses?.length || 0,
         );
         setResponses(responsesData.responses || []);
+
+        // Reset retry count on success
+        setRetryCount(0);
+
       } catch (err) {
         console.error("Error fetching analytics data:", err);
-        setError(
-          err instanceof Error ? err.message : "Failed to load analytics",
-        );
+
+        // Better error messaging for timeouts
+        let errorMessage = "Failed to load analytics";
+        if (err instanceof Error) {
+          if (err.message?.includes('timeout') || err.name === 'AbortError') {
+            errorMessage = 'The data is taking too long to load. This might be due to a large dataset or server load. Please try again.';
+          } else {
+            errorMessage = err.message;
+          }
+        }
+        setError(errorMessage);
       } finally {
         setLoading(false);
       }
     };
 
     fetchData();
+
   }, [id]);
 
+  const handleRetry = async () => {
+    setIsRetrying(true);
+    setRetryCount(prev => prev + 1);
+    try {
+      await fetchData();
+    } catch (error) {
+      console.error("Retry failed:", error);
+    } finally {
+      setIsRetrying(false);
+    }
+  };
   // Add this useEffect to update selectedQuestion
   useEffect(() => {
     if (!selectedQuestionId || !form?.sections?.[0]) {
@@ -8150,22 +8185,70 @@ export default function FormAnalyticsDashboard() {
   }
 
   if (error) {
+    const isTimeoutError = error.includes('timeout') || error.includes('too long');
+
     return (
       <div className="p-6">
-        <div className="text-center py-12">
-          <p className="text-red-600">Error loading analytics: {error}</p>
-          {!isGuest && (
-            <button onClick={() => navigate(-1)} className="mt-4 btn-primary">
-              Go Back
-            </button>
-          )}
-          {isGuest && (
+        <div className="text-center py-12 max-w-md mx-auto">
+          <div className={`rounded-lg p-6 mb-4 ${isTimeoutError ? 'bg-amber-50 dark:bg-amber-900/20' : 'bg-red-50 dark:bg-red-900/20'}`}>
+            {isTimeoutError ? (
+              <Clock className="w-12 h-12 text-amber-500 mx-auto mb-4" />
+            ) : (
+              <XCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
+            )}
+            <p className={`font-medium ${isTimeoutError ? 'text-amber-700 dark:text-amber-400' : 'text-red-600 dark:text-red-400'}`}>
+              {error}
+            </p>
+            {isTimeoutError && (
+              <p className="text-sm text-gray-500 dark:text-gray-400 mt-2">
+                This usually happens when there's a large amount of data to process.
+                You can try again or view the data with limited functionality.
+              </p>
+            )}
+          </div>
+
+          <div className="flex gap-3 justify-center flex-wrap">
             <button
-              onClick={handleLogout}
-              className="mt-4 btn-primary bg-red-600 hover:bg-red-700"
+              onClick={handleRetry}
+              disabled={isRetrying || loading}
+              className="px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-colors"
             >
-              Log out
+              {isRetrying || loading ? (
+                <>
+                  <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+                  Loading...
+                </>
+              ) : (
+                <>
+                  <RotateCcw className="w-4 h-4" />
+                  Retry
+                </>
+              )}
             </button>
+
+            {!isGuest && (
+              <button
+                onClick={() => navigate(-1)}
+                className="px-6 py-2.5 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              >
+                Go Back
+              </button>
+            )}
+
+            {isGuest && (
+              <button
+                onClick={handleLogout}
+                className="px-6 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+              >
+                Log out
+              </button>
+            )}
+          </div>
+
+          {retryCount > 2 && (
+            <p className="text-xs text-gray-400 mt-4">
+              Multiple retry attempts failed. Please refresh the page or contact support.
+            </p>
           )}
         </div>
       </div>

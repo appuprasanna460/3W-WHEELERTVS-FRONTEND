@@ -1079,18 +1079,35 @@ class ApiClient {
     }>("/analytics/my-review-stats");
   }
 
-  async getPerformanceTable(params?: { startDate?: string; endDate?: string; formId?: string; tenantId?: string }) {
+  async getPerformanceTable(params?: {
+    startDate?: string;
+    endDate?: string;
+    formId?: string;
+    tenantId?: string;
+    page?: number;
+    limit?: number;
+  }) {
     let url = "/analytics/performance-table";
     if (params) {
       const searchParams = new URLSearchParams();
       if (params.startDate) searchParams.append("startDate", params.startDate);
       if (params.endDate) searchParams.append("endDate", params.endDate);
       if (params.formId) searchParams.append("formId", params.formId);
+      if (params.tenantId) searchParams.append("tenantId", params.tenantId);
+      searchParams.append("page", String(params.page || 1));
+      searchParams.append("limit", String(params.limit || 50));
       const query = searchParams.toString();
       if (query) url += `?${query}`;
     }
-    // Add 2-minute timeout
-    return this.get<any[]>(url, { timeout: 120000 });
+    // Pagination + server-side maxTimeMS keep this well under 5s now, but
+    // keep a generous timeout as a safety net for slow networks.
+    return this.get<{
+      success: boolean;
+      data: any[];
+      summary: any;
+      meta: any;
+      pagination: { page: number; limit: number; hasMore: boolean };
+    }>(url, { timeout: 30000 });
   }
 
   async getInternalTrackingPerformance(params?: { page?: number; limit?: number; search?: string; sortBy?: string; sortOrder?: string }) {

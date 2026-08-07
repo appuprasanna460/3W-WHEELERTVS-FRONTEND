@@ -3095,6 +3095,11 @@ export default function FormAnalyticsDashboard() {
   const [performanceTableLoading, setPerformanceTableLoading] = useState(false);
   const [performancePage, setPerformancePage] = useState(1);
   const [performancePageSize, setPerformancePageSize] = useState(10);
+  // Server-side pagination metadata for the performance table. The backend
+  // now paginates the underlying responses query (skip/limit) rather than
+  // returning the entire dataset, so `hasMore` drives whether "Next" is
+  // enabled instead of a locally-computed page count.
+  const [performanceHasMore, setPerformanceHasMore] = useState(false);
   const [responsesPage, setResponsesPage] = useState(1);
   const [responsesPageSize, setResponsesPageSize] = useState(20);
   const [responsesSearchTerm, setResponsesSearchTerm] = useState("");
@@ -3157,9 +3162,12 @@ export default function FormAnalyticsDashboard() {
           startDate: dateFilter.startDate,
           endDate: dateFilter.endDate,
           formId: id,
+          page: performancePage,
+          limit: performancePageSize,
         });
         if (response.success) {
           setPerformanceTableData(response.data || []);
+          setPerformanceHasMore(!!response.pagination?.hasMore);
         }
       } catch (error) {
         console.error("Error fetching performance table:", error);
@@ -3173,7 +3181,17 @@ export default function FormAnalyticsDashboard() {
     };
 
     fetchPerformanceTable();
-  }, [id, dateFilter.startDate, dateFilter.endDate, user?.role]);
+    // performancePage/performancePageSize are included so paging or
+    // changing page size re-fetches from the server instead of slicing an
+    // already-loaded full dataset in memory.
+  }, [id, dateFilter.startDate, dateFilter.endDate, user?.role, performancePage, performancePageSize]);
+
+  // Reset back to page 1 whenever the filters that change the underlying
+  // dataset change, so the user isn't stranded on a page that no longer
+  // exists for the new filter set.
+  useEffect(() => {
+    setPerformancePage(1);
+  }, [id, dateFilter.startDate, dateFilter.endDate]);
 
   // Load performance scores from API
   useEffect(() => {
@@ -5686,6 +5704,7 @@ export default function FormAnalyticsDashboard() {
     let rejected = 0;
     let reworked = 0;
     let reworkCompleted = 0;
+    let dispatched = 0;
 
     filteredResponses.forEach((response) => {
       const status = responseStatuses[response.id];
@@ -5698,9 +5717,15 @@ export default function FormAnalyticsDashboard() {
       } else if (status === "Rejected") {
         rejected++;
       }
+      // Dispatch is tracked independently of status - a response can be
+      // Direct Ok (or any other status) AND already dispatched, so this
+      // is counted separately rather than as a mutually-exclusive bucket.
+      if (response.isDispatched) {
+        dispatched++;
+      }
     });
 
-    return { accepted, rejected, reworked, reworkCompleted };
+    return { accepted, rejected, reworked, reworkCompleted, dispatched };
   }, [filteredResponses, responseStatuses]);
 
   const totalPieChartData = useMemo(() => {
@@ -5708,6 +5733,7 @@ export default function FormAnalyticsDashboard() {
     const reworkCompleted = inspectionStats.reworkCompleted;
     const totalNo = inspectionStats.rejected;
     const totalNA = inspectionStats.reworked;
+    const totalDispatched = inspectionStats.dispatched;
 
     const total = directOk + reworkCompleted + totalNo + totalNA;
 
@@ -5717,7 +5743,8 @@ export default function FormAnalyticsDashboard() {
         reworkCompleted: 0,
         no: 0,
         na: 0,
-        counts: { directOk: 0, reworkCompleted: 0, no: 0, na: 0, total: 0 },
+        dispatched: 0,
+        counts: { directOk: 0, reworkCompleted: 0, no: 0, na: 0, dispatched: 0, total: 0 },
       };
     }
 
@@ -5725,17 +5752,25 @@ export default function FormAnalyticsDashboard() {
     const reworkCompletedPercent = (reworkCompleted / total) * 100;
     const noPercent = (totalNo / total) * 100;
     const naPercent = (totalNA / total) * 100;
+    // Dispatched is expressed as a % of the same total responses, but
+    // since it overlaps with the status buckets above (a dispatched
+    // response is still counted in Direct Ok/Rework/etc.), this slice
+    // won't sum to 100% together with the other four - it's a separate
+    // "how far along the pipeline" signal, not a disjoint category.
+    const dispatchedPercent = (totalDispatched / total) * 100;
 
     return {
       directOk: Number(directOkPercent.toFixed(1)),
       reworkCompleted: Number(reworkCompletedPercent.toFixed(1)),
       no: Number(noPercent.toFixed(1)),
       na: Number(naPercent.toFixed(1)),
+      dispatched: Number(dispatchedPercent.toFixed(1)),
       counts: {
         directOk: directOk,
         reworkCompleted: reworkCompleted,
         no: totalNo,
         na: totalNA,
+        dispatched: totalDispatched,
         total: total,
       },
     };
@@ -5877,6 +5912,13 @@ export default function FormAnalyticsDashboard() {
   }, [form, filteredResponses, analyticsView]);
 
   const OverallQualityPieChart = () => {
+    // NOTE: Dispatched is intentionally NOT one of the doughnut slices.
+    // Direct Ok / Rework Completed / Rejected / Ongoing Rework are
+    // mutually exclusive and sum to 100% of responses, so they make a
+    // correct pie. Dispatched is a different, overlapping dimension (a
+    // response can be "Direct Ok" AND dispatched), so mixing it into the
+    // same slices made the chart visually sum past 100% and look wrong.
+    // It's rendered as its own progress indicator below the chart instead.
     const data = {
       labels: ["Direct Ok", "Rework Completed", "Rejected", "Ongoing Rework"],
       datasets: [
@@ -5993,8 +6035,9 @@ export default function FormAnalyticsDashboard() {
                 <Doughnut data={data} options={options} />
               </div>
 
-              {/* Stats summary */}
-              <div className="mt-4 grid grid-cols-4 gap-1 sm:gap-2">
+              {/* Stats summary - these 4 mirror the pie slices above and
+                  sum to 100% of responses */}
+              <div className="mt-4 grid grid-cols-5 gap-1 sm:gap-2">
                 {/* Direct Ok */}
                 <div className="text-center p-1 bg-green-50/50 dark:bg-green-900/10 rounded-lg">
                   <div className="text-[10px] sm:text-xs font-bold text-green-600 dark:text-green-400">
@@ -6046,7 +6089,29 @@ export default function FormAnalyticsDashboard() {
                     ({totalPieChartData.counts.na})
                   </div>
                 </div>
+                <div className="text-center p-1 bg-amber-50/50 dark:bg-amber-900/10 rounded-lg">
+                  <div className="text-[10px] sm:text-xs font-bold text-amber-600 dark:text-amber-400">
+                    {totalPieChartData.dispatched}%
+                  </div>
+                  <div className="text-[9px] font-medium text-gray-700 dark:text-gray-300 truncate">
+                    Dispatched{" "}
+                  </div>
+                  <div className="text-[8px] text-gray-600 dark:text-gray-500">
+                    ({totalPieChartData.counts.dispatched})
+                  </div>
+                </div>
               </div>
+
+              {/* Dispatched - shown separately from the pie/stats-grid
+                  above since it's not a disjoint status (a response can
+                  be Direct Ok AND dispatched). Plain text summary only,
+                  no chart/progress-bar. */}
+              {/* <div className="mt-3 text-center text-[10px] sm:text-xs font-semibold text-gray-700 dark:text-gray-300">
+                Dispatched{" "}
+                <span className="text-purple-600 dark:text-purple-400 font-bold">
+                  ({totalPieChartData.dispatched}%, {totalPieChartData.counts.dispatched} of {totalPieChartData.counts.total})
+                </span>
+              </div> */}
             </>
           )}
         </div>
@@ -7730,7 +7795,8 @@ export default function FormAnalyticsDashboard() {
 
     if (performanceTableData.length === 0) return null;
 
-    // Apply local name filter
+    // Apply local name filter (still client-side since it's just a filter
+    // over the current page, not a re-page)
     const localFilteredPerformance =
       localFilterName === "All"
         ? performanceTableData
@@ -7738,17 +7804,13 @@ export default function FormAnalyticsDashboard() {
           (row: any) => row.name === localFilterName,
         );
 
-    // Pagination logic
-    const totalPerformanceItems = localFilteredPerformance.length;
-    const totalPerformancePages = Math.ceil(
-      totalPerformanceItems / performancePageSize,
-    );
+    // Pagination is now server-side: `performanceTableData` already IS the
+    // current page (the backend applies skip/limit), so we just render it
+    // directly instead of re-slicing an in-memory array. `performanceHasMore`
+    // (from the API response) tells us whether a "Next" page exists.
+    const paginatedPerformance = localFilteredPerformance;
     const startIndex = (performancePage - 1) * performancePageSize;
-    const endIndex = startIndex + performancePageSize;
-    const paginatedPerformance = localFilteredPerformance.slice(
-      startIndex,
-      endIndex,
-    );
+    const endIndex = startIndex + paginatedPerformance.length;
 
     return (
       <div className="mt-12 border-t border-gray-100 dark:border-gray-700 pt-8">
@@ -7884,8 +7946,10 @@ export default function FormAnalyticsDashboard() {
             </table>
           </div>
 
-          {/* Pagination controls - same as before */}
-          {totalPerformancePages > 1 && (
+          {/* Pagination controls - server-driven (page/limit sent to the
+              API, "Next" enabled by `hasMore` from the response since the
+              backend no longer loads the full dataset to know a total). */}
+          {(performancePage > 1 || performanceHasMore) && (
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4 p-6 bg-gray-50/50 dark:bg-gray-900/50 border-t border-gray-50 dark:border-gray-700">
               <div className="flex items-center gap-3">
                 <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
@@ -7906,8 +7970,7 @@ export default function FormAnalyticsDashboard() {
                   ))}
                 </select>
                 <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                  {startIndex + 1}-{Math.min(endIndex, totalPerformanceItems)}{" "}
-                  of {totalPerformanceItems}
+                  {startIndex + 1}-{endIndex} · page {performancePage}
                 </span>
               </div>
 
@@ -7916,49 +7979,19 @@ export default function FormAnalyticsDashboard() {
                   onClick={() =>
                     setPerformancePage((prev) => Math.max(1, prev - 1))
                   }
-                  disabled={performancePage === 1}
+                  disabled={performancePage === 1 || performanceTableLoading}
                   className="p-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl disabled:opacity-30 transition-all hover:bg-gray-50 dark:hover:bg-gray-700 shadow-sm"
                 >
                   <ChevronLeft className="w-4 h-4" />
                 </button>
 
-                <div className="flex items-center gap-1">
-                  {Array.from(
-                    { length: totalPerformancePages },
-                    (_, i) => i + 1,
-                  )
-                    .filter(
-                      (num) =>
-                        totalPerformancePages <= 5 ||
-                        Math.abs(num - performancePage) <= 1 ||
-                        num === 1 ||
-                        num === totalPerformancePages,
-                    )
-                    .map((pageNum, idx, arr) => (
-                      <React.Fragment key={pageNum}>
-                        {idx > 0 && arr[idx - 1] !== pageNum - 1 && (
-                          <span className="text-gray-300 mx-1">...</span>
-                        )}
-                        <button
-                          onClick={() => setPerformancePage(pageNum)}
-                          className={`min-w-[32px] h-8 text-[10px] font-black rounded-xl transition-all ${performancePage === pageNum
-                            ? "bg-purple-600 text-white shadow-lg shadow-purple-500/30"
-                            : "bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 hover:bg-gray-50"
-                            }`}
-                        >
-                          {pageNum}
-                        </button>
-                      </React.Fragment>
-                    ))}
-                </div>
+                <span className="min-w-[32px] h-8 flex items-center justify-center text-[10px] font-black rounded-xl bg-purple-600 text-white shadow-lg shadow-purple-500/30 px-2">
+                  {performancePage}
+                </span>
 
                 <button
-                  onClick={() =>
-                    setPerformancePage((prev) =>
-                      Math.min(totalPerformancePages, prev + 1),
-                    )
-                  }
-                  disabled={performancePage === totalPerformancePages}
+                  onClick={() => setPerformancePage((prev) => prev + 1)}
+                  disabled={!performanceHasMore || performanceTableLoading}
                   className="p-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl disabled:opacity-30 transition-all hover:bg-gray-50 dark:hover:bg-gray-700 shadow-sm"
                 >
                   <ChevronRight className="w-4 h-4" />

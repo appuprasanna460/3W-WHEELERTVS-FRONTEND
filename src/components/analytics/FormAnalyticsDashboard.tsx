@@ -2747,7 +2747,13 @@ export default function FormAnalyticsDashboard() {
     let selfSubmissionsCount = 0;
 
     selectedResponseIds.forEach((id) => {
-      const resp = responses.find((r) => r.id === id);
+      // `responses` (the full analytics set) may not be loaded if the user
+      // came straight to the Responses tab without visiting another tab
+      // first; fall back to the server-paginated `tableResponses`, which
+      // always has the rows actually checked on this page.
+      const resp =
+        responses.find((r) => r.id === id) ||
+        tableResponses.find((r) => r.id === id);
       if (resp) {
         if (status !== null && isSubmitterOfResponse(resp)) {
           selfSubmissionsCount++;
@@ -2780,7 +2786,11 @@ export default function FormAnalyticsDashboard() {
     let selfSubmissionsCount = 0;
 
     allIds.forEach((id) => {
-      const resp = responses.find((r) => r.id === id);
+      // Same fallback as above: tableResponses always has these rows since
+      // allIds was derived from it directly.
+      const resp =
+        responses.find((r) => r.id === id) ||
+        tableResponses.find((r) => r.id === id);
       if (resp) {
         if (status !== null && isSubmitterOfResponse(resp)) {
           selfSubmissionsCount++;
@@ -3104,6 +3114,24 @@ export default function FormAnalyticsDashboard() {
   const [responsesPageSize, setResponsesPageSize] = useState(20);
   const [responsesSearchTerm, setResponsesSearchTerm] = useState("");
 
+  // Lazy-loading-by-tab state. Nothing in `loadedTabs` fires on mount —
+  // each tab's data is fetched the first time the user actually views it.
+  const [activeTab, setActiveTab] = useState<
+    "dashboard" | "question" | "section" | "overall" | "responses"
+  >("dashboard");
+  const [loadedTabs, setLoadedTabs] = useState<Set<string>>(new Set());
+  // Server-side paginated data for the Responses tab (replaces the old
+  // client-side slice of the full `responses` array).
+  const [tableResponses, setTableResponses] = useState<Response[]>([]);
+  const [totalResponsesCount, setTotalResponsesCount] = useState(0);
+  const [loadingTable, setLoadingTable] = useState(false);
+  // Drives the dashboard's single loading spinner. True until the full
+  // analytics response set (used by the trend chart, quality pie chart,
+  // defect chart, etc.) has finished its first fetch. Starts true so the
+  // spinner shows immediately on the default "dashboard" tab instead of a
+  // flash of "No data" while the lazy fetch is still in flight.
+  const [analyticsResponsesLoading, setAnalyticsResponsesLoading] = useState(true);
+
   const getChassisDisplayValue = (value: any): string => {
     if (!value) return "-";
     if (typeof value === "object") {
@@ -3132,55 +3160,67 @@ export default function FormAnalyticsDashboard() {
   const [biwBulkUpdateTargetIds, setBiwBulkUpdateTargetIds] = useState<string[]>([]);
   const [biwBulkUpdateSkippedCount, setBiwBulkUpdateSkippedCount] = useState(0);
 
-  // Server-side pagination for the "Responses" table tab. Instead of relying
-  // on the full `responses` array already loaded for analytics, this tab
-  // fetches only the current page directly from the backend
-  // (getResponsesByForm already supports page/limit + returns a `pagination`
-  // object), so opening this tab with a form that has thousands of
-  // responses doesn't require the whole dataset up front.
+
+  // Server-side pagination for the "Responses" table tab: fetches only the
+  // current page directly from the backend instead of slicing an
+  // already-loaded full dataset in memory (see fetchResponsesPage below).
   //
   // NOTE: the existing date/inspector/location/column/cascading filters
   // below are computed against the full in-memory `responses` array for the
   // charts and other analytics tabs. They are NOT (yet) sent to the backend,
   // so they won't filter this server-paginated table — only pagination
   // (page + page size) is server-side for now.
+  const isLoadingTableResponses = loadingTable;
 
+  // Gates the entire Dashboard tab behind a single spinner instead of
+  // letting each chart/table independently render its own "No data yet"
+  // state while the full analytics response set is still in flight.
+  // Deliberately NOT tied to the top-level `loading` flag: that only
+  // covers the initial form-details fetch (see fetchData), which now
+  // resolves well before the dashboard's own lazy data finishes loading —
+  // wiring it to `loading` would let the empty states flash through
+  // exactly as before.
+  const isChartLoading = analyticsResponsesLoading;
 
-  // REPLACE with:
-  const isLoadingTableResponses = false; // data's already in memory, no extra fetch needed
+  // fetchPerformanceTable and fetchSummary are now plain functions (not
+  // auto-firing effects) — they're invoked lazily from the tab-loading
+  // effects further down, the first time the Dashboard tab is opened.
+  const fetchPerformanceTable = async () => {
+    if (!id || (user?.role !== "admin" && user?.role !== "superadmin"))
+      return;
 
-
-
-  useEffect(() => {
-    const fetchPerformanceTable = async () => {
-      if (!id || (user?.role !== "admin" && user?.role !== "superadmin"))
-        return;
-
-      setPerformanceTableLoading(true);
-      try {
-        const response = await apiClient.getPerformanceTable({
-          startDate: dateFilter.startDate,
-          endDate: dateFilter.endDate,
-          formId: id,
-          page: performancePage,
-          limit: performancePageSize,
-        });
-        if (response.success) {
-          setPerformanceTableData(response.data || []);
-          setPerformanceHasMore(!!response.pagination?.hasMore);
-        }
-      } catch (error) {
-        console.error("Error fetching performance table:", error);
-        // Don't show error toast for performance table - it's not critical
-        if (error instanceof Error && !error.message?.includes('timeout')) {
-          showToast("Failed to load performance data", "error");
-        }
-      } finally {
-        setPerformanceTableLoading(false);
+    setPerformanceTableLoading(true);
+    try {
+      const response = await apiClient.getPerformanceTable({
+        startDate: dateFilter.startDate,
+        endDate: dateFilter.endDate,
+        formId: id,
+        page: performancePage,
+        limit: performancePageSize,
+      });
+      if (response.success) {
+        setPerformanceTableData(response.data || []);
+        setPerformanceHasMore(!!response.pagination?.hasMore);
       }
-    };
+    } catch (error) {
+      console.error("Error fetching performance table:", error);
+      // Don't show error toast for performance table - it's not critical
+      if (error instanceof Error && !error.message?.includes('timeout')) {
+        showToast("Failed to load performance data", "error");
+      }
+    } finally {
+      setPerformanceTableLoading(false);
+    }
+  };
 
-    fetchPerformanceTable();
+  // Re-fetch on page/page-size/filter changes, but only once the Dashboard
+  // tab has already been loaded at least once — the initial load is
+  // triggered by the lazy-tab effect instead, so this avoids a duplicate
+  // fetch racing it on first mount.
+  useEffect(() => {
+    if (loadedTabs.has("dashboard")) {
+      fetchPerformanceTable();
+    }
     // performancePage/performancePageSize are included so paging or
     // changing page size re-fetches from the server instead of slicing an
     // already-loaded full dataset in memory.
@@ -3656,39 +3696,38 @@ export default function FormAnalyticsDashboard() {
     return labels;
   }, [form, responses]);
 
-  useEffect(() => {
-    const fetchSummary = async () => {
-      setSummaryLoading(true);
-      try {
-        let url = "/analytics/inspector-summary";
-        if (id) {
-          url += `?formId=${id}`;
-        }
-
-        const [summaryRes, hierarchyRes] = await Promise.all([
-          apiClient.get<any>(url),
-          apiClient.getUsersHierarchy({ role: "Inspector" }),
-        ]);
-
-        if (summaryRes.data) {
-          setInspectorSummary(summaryRes.data.summary || []);
-          setSummaryStatuses(summaryRes.data.allStatuses || []);
-        }
-
-        if (hierarchyRes.users) {
-          setAllInspectors(hierarchyRes.users);
-        }
-      } catch (error) {
-        console.error("Error fetching inspector data:", error);
-      } finally {
-        setSummaryLoading(false);
+  // Was an auto-firing useEffect keyed on [user, id]; now a plain function
+  // invoked lazily the first time the Dashboard tab is opened (see the
+  // tab-loading effects below), so it no longer fires on mount regardless
+  // of which tab the user lands on.
+  const fetchSummary = async () => {
+    if (!user) return;
+    setSummaryLoading(true);
+    try {
+      let url = "/analytics/inspector-summary";
+      if (id) {
+        url += `?formId=${id}`;
       }
-    };
 
-    if (user) {
-      fetchSummary();
+      const [summaryRes, hierarchyRes] = await Promise.all([
+        apiClient.get<any>(url),
+        apiClient.getUsersHierarchy({ role: "Inspector" }),
+      ]);
+
+      if (summaryRes.data) {
+        setInspectorSummary(summaryRes.data.summary || []);
+        setSummaryStatuses(summaryRes.data.allStatuses || []);
+      }
+
+      if (hierarchyRes.users) {
+        setAllInspectors(hierarchyRes.users);
+      }
+    } catch (error) {
+      console.error("Error fetching inspector data:", error);
+    } finally {
+      setSummaryLoading(false);
     }
-  }, [user, id]);
+  };
 
   const filteredInspectorSummary = useMemo(() => {
     let result = [...inspectorSummary];
@@ -3793,26 +3832,26 @@ export default function FormAnalyticsDashboard() {
       setError(null); // Clear any previous errors
 
       const formCacheKey = `/forms/${id}`;
-      const responsesCacheKey = `/responses/form/${id}?page=1&limit=5000&analytics=true`;
-
       const isFormFresh = apiClient.isCacheFresh(formCacheKey, 30);
-      const isResponsesFresh = apiClient.isCacheFresh(responsesCacheKey, 30);
 
-      if (isFormFresh && isResponsesFresh) {
-        console.log("[ANALYTICS DEBUG] Cache is fresh (<30s). Skipping background API calls.");
+      if (isFormFresh) {
+        console.log("[ANALYTICS DEBUG] Form cache is fresh (<30s). Skipping fetch.");
         setLoading(false);
         return;
       }
 
-      console.log("[ANALYTICS DEBUG] Fetching form:", id);
+      console.log("[ANALYTICS DEBUG] Fetching form details:", id);
 
-      // Fetch form details with longer timeout
+      // ✅ Only fetch form details on mount now. Responses (full analytics
+      // set, or the paginated Responses-tab set) load lazily, the first
+      // time the user actually visits a tab that needs them — see the
+      // tab-loading effects below.
       const formData = await apiClient.request<{ form: any }>(formCacheKey, {
         forceNetwork: true,
-        timeout: 60000 // 60 seconds for form data
+        timeout: 60000, // 60 seconds for form data
       });
-      setForm(formData.form);
 
+      setForm(formData.form);
       console.log("[ANALYTICS DEBUG] Form fetched:", formData.form?.title);
 
       if (formData.form?.sections && formData.form.sections.length > 0) {
@@ -3820,17 +3859,6 @@ export default function FormAnalyticsDashboard() {
           formData.form.sections.map((s: Section) => s.id),
         );
       }
-
-      // Fetch ALL responses with longer timeout
-      const responsesData = await apiClient.getAllFormResponses(id, {
-        analytics: true,
-        forceNetwork: true
-      });
-      console.log(
-        "[ANALYTICS DEBUG] Responses fetched:",
-        responsesData.responses?.length || 0,
-      );
-      setResponses(responsesData.responses || []);
 
       // Reset retry count on success
       setRetryCount(0);
@@ -3853,17 +3881,128 @@ export default function FormAnalyticsDashboard() {
     }
   };
   useEffect(() => {
-
-
     fetchData();
-
   }, [id]);
+
+  // ── Lazy loading by tab ──────────────────────────────────────────────
+  // Fetches the FULL analytics response set (used by Dashboard/Question/
+  // Section/Overall for charts, status calc, exports, BIW review, etc).
+  // Replaces the old getAllFormResponses call that used to run
+  // unconditionally inside fetchData on every page load.
+  const fetchFullAnalyticsResponses = async () => {
+    if (!id) return;
+    setAnalyticsResponsesLoading(true);
+    try {
+      const responsesData = await apiClient.getAllFormResponses(id, {
+        analytics: true,
+        forceNetwork: true,
+      });
+      console.log(
+        "[ANALYTICS DEBUG] Full analytics responses fetched:",
+        responsesData.responses?.length || 0,
+      );
+      setResponses(responsesData.responses || []);
+    } catch (err) {
+      console.error("Error fetching full analytics responses:", err);
+      showToast("Failed to load analytics data. Please try again.", "error");
+    } finally {
+      setAnalyticsResponsesLoading(false);
+    }
+  };
+
+  // Fetches a single page of responses directly from the backend for the
+  // Responses tab, instead of slicing an already-loaded full dataset in
+  // memory. This is the server-side pagination required for large
+  // (2000+) response forms.
+  const fetchResponsesPage = async (page: number) => {
+    if (!id) return;
+    setLoadingTable(true);
+    try {
+      const data = await apiClient.getFormResponses(id, {
+        page: page,
+        limit: responsesPageSize,
+        analytics: false,
+        forceNetwork: true,
+      });
+      setTableResponses(data.responses || []);
+      setTotalResponsesCount(data.pagination?.totalResponses || 0);
+    } catch (err) {
+      console.error("Error fetching responses page:", err);
+      showToast("Failed to load responses. Please try again.", "error");
+    } finally {
+      setLoadingTable(false);
+    }
+  };
+
+  // Keep activeTab in sync with analyticsView (existing tab buttons already
+  // set analyticsView; this propagates that choice into the lazy-loading
+  // tab tracker below without needing to touch every button's onClick).
+  useEffect(() => {
+    const knownTabs = ["dashboard", "question", "section", "overall", "responses"] as const;
+    const tab = (knownTabs as readonly string[]).includes(analyticsView)
+      ? (analyticsView as typeof activeTab)
+      : "dashboard";
+    setActiveTab(tab);
+  }, [analyticsView]);
+
+  // Dashboard tab: inspector summary + performance table + the full
+  // analytics response set, loaded once, the first time this tab is shown.
+  useEffect(() => {
+    if (activeTab === "dashboard" && !loadedTabs.has("dashboard")) {
+      fetchSummary();
+      fetchPerformanceTable();
+      fetchFullAnalyticsResponses();
+      setLoadedTabs((prev) => new Set(prev).add("dashboard"));
+    }
+  }, [activeTab]);
+
+  // Question / Section / Overall tabs also derive their charts and stats
+  // from the full `responses` array. If the user lands directly on one of
+  // these without visiting Dashboard first, load the full set once here.
+  useEffect(() => {
+    if (
+      (activeTab === "question" || activeTab === "section" || activeTab === "overall") &&
+      !loadedTabs.has(activeTab)
+    ) {
+      if (!loadedTabs.has("dashboard") && responses.length === 0) {
+        fetchFullAnalyticsResponses();
+      }
+      setLoadedTabs((prev) => new Set(prev).add(activeTab));
+    }
+  }, [activeTab]);
+
+  // Responses tab: server-side paginated fetch, loaded once on first visit.
+  useEffect(() => {
+    if (activeTab === "responses" && !loadedTabs.has("responses")) {
+      fetchResponsesPage(1);
+      setLoadedTabs((prev) => new Set(prev).add("responses"));
+    }
+  }, [activeTab]);
+
+  // Page / page-size changes on an already-loaded Responses tab re-fetch
+  // from the server instead of re-slicing an in-memory array.
+  useEffect(() => {
+    if (activeTab === "responses" && loadedTabs.has("responses")) {
+      fetchResponsesPage(responsesPage);
+    }
+  }, [responsesPage, responsesPageSize, activeTab]);
 
   const handleRetry = async () => {
     setIsRetrying(true);
     setRetryCount(prev => prev + 1);
     try {
       await fetchData();
+      // fetchData only re-fetches the form now; also re-fetch whatever
+      // data source the currently active tab depends on.
+      if (activeTab === "responses") {
+        await fetchResponsesPage(responsesPage);
+      } else {
+        await fetchFullAnalyticsResponses();
+        if (activeTab === "dashboard") {
+          await fetchPerformanceTable();
+          await fetchSummary();
+        }
+      }
     } catch (error) {
       console.error("Retry failed:", error);
     } finally {
@@ -4292,16 +4431,15 @@ export default function FormAnalyticsDashboard() {
   // Auto-open chat modal if responseId is in URL
   useEffect(() => {
     const responseId = searchParams.get("responseId");
-    if (responseId && responses.length > 0) {
-      const response = responses.find(
-        (r) => r.id === responseId || r._id === responseId,
-      );
-      if (response && !showChatModal) {
-        setChatResponse(response);
-        setShowChatModal(true);
-      }
+    if (!responseId) return;
+    const response =
+      responses.find((r) => r.id === responseId || r._id === responseId) ||
+      tableResponses.find((r) => r.id === responseId || r._id === responseId);
+    if (response && !showChatModal) {
+      setChatResponse(response);
+      setShowChatModal(true);
     }
-  }, [searchParams, responses, showChatModal]);
+  }, [searchParams, responses, tableResponses, showChatModal]);
 
   const handleSendMessage = async (messageOverride?: string) => {
     const messageToSend = messageOverride ?? newMessage;
@@ -4555,14 +4693,16 @@ export default function FormAnalyticsDashboard() {
 
 
 
-  const totalResponsesCount = filteredResponses.length;
+  // `totalResponsesCount` and `tableResponses` are now server-driven state
+  // (set by fetchResponsesPage), not derived from the in-memory
+  // `filteredResponses` array — this is the server-side pagination change.
+  // NOTE: the search/date/inspector/column filters above still only affect
+  // `filteredResponses`, which other (non-Responses-tab) analytics use;
+  // they are not yet sent to the backend, so they do not filter the
+  // server-paginated Responses table. Wiring that through is a follow-up.
   const totalResponsesPages = Math.max(1, Math.ceil(totalResponsesCount / responsesPageSize));
   const currentResponsesPage = Math.min(responsesPage, totalResponsesPages);
   const responsesStartIndex = totalResponsesCount > 0 ? (currentResponsesPage - 1) * responsesPageSize : 0;
-  const tableResponses = useMemo(
-    () => filteredResponses.slice(responsesStartIndex, responsesStartIndex + responsesPageSize),
-    [filteredResponses, responsesStartIndex, responsesPageSize],
-  );
   const responsesEndIndex = responsesStartIndex + tableResponses.length;
 
   const pageSizesList = useMemo(() => {
@@ -4614,6 +4754,7 @@ export default function FormAnalyticsDashboard() {
       })
       .slice(0, 5);
 
+    // 🔥 FIX: Use filtered responses date range, not today's date
     const responseTrend = filteredResponses.reduce(
       (acc: Record<string, number>, response) => {
         const timestamp = getResponseTimestamp(response);
@@ -4629,18 +4770,35 @@ export default function FormAnalyticsDashboard() {
       {},
     );
 
-    const last7Days = Array.from({ length: 7 }, (_, i) => {
-      const date = new Date();
-      date.setDate(date.getDate() - i);
-      return date.toISOString().split("T")[0];
-    }).reverse();
+    // 🔥 FIX: Get dates from the actual filtered responses
+    let dateRange: string[] = [];
 
-    const maxCount = Math.max(
-      ...last7Days.map((date) => responseTrend[date] || 0),
-      1,
-    );
-    const percentageData = last7Days.map((date) =>
-      Math.round(((responseTrend[date] || 0) / maxCount) * 100),
+    if (dateFilter.type !== "all" && dateFilter.startDate && dateFilter.endDate) {
+      // Use the filtered date range
+      const start = new Date(dateFilter.startDate);
+      const end = new Date(dateFilter.endDate);
+      const days: string[] = [];
+      const current = new Date(start);
+
+      while (current <= end) {
+        days.push(current.toISOString().split("T")[0]);
+        current.setDate(current.getDate() + 1);
+      }
+      dateRange = days;
+    } else {
+      // Fallback to last 30 days if no filter applied
+      dateRange = Array.from({ length: 30 }, (_, i) => {
+        const date = new Date();
+        date.setDate(date.getDate() - i);
+        return date.toISOString().split("T")[0];
+      }).reverse();
+    }
+
+    // Get response counts for each day in the range
+    const counts = dateRange.map((date) => responseTrend[date] || 0);
+    const maxCount = Math.max(...counts, 1);
+    const percentageData = counts.map((count) =>
+      Math.round((count / maxCount) * 100),
     );
 
     return {
@@ -4650,10 +4808,10 @@ export default function FormAnalyticsDashboard() {
       rejected,
       recentResponses,
       responseTrend,
-      last7Days,
+      dateRange, // ← Use this instead of last30Days
       percentageData,
     };
-  }, [filteredResponses]);
+  }, [filteredResponses, dateFilter.startDate, dateFilter.endDate, dateFilter.type]);
 
   // qualityChartResponses and sectionChartResponses used to be computed
   // separately, but they apply the exact same date-filter logic to the same
@@ -8570,165 +8728,188 @@ export default function FormAnalyticsDashboard() {
           }
           aria-hidden={analyticsView !== "dashboard"}
         >
-          <div className="w-full" id="summary-cards">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 w-full">
-              {/* Response Trend Chart - COMPACT */}
-              <div className="p-6 bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 flex flex-col rounded-xl border border-gray-200 dark:border-gray-700 shadow-lg hover:shadow-xl transition-shadow">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center">
-                    <div className="p-2 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-lg mr-2">
-                      <BarChart3 className="w-4 h-4 text-white" />
-                    </div>
-                    <div>
-                      <h3 className="text-md font-bold text-primary-900 dark:text-white">
-                        Response Trend
-                      </h3>
-                      <p className="text-xs text-primary-500 dark:text-primary-400">
-                        Last 30 days
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                {Object.keys(analytics.responseTrend).length === 0 ? (
-                  <div className="flex-1 flex items-center justify-center min-h-[280px]">
-                    <div className="text-center">
-                      <div className="mb-2">
-                        <BarChart3 className="w-8 h-8 text-gray-300 dark:text-gray-600 mx-auto" />
+          {isChartLoading && !isExporting ? (
+            // Single loading state for the entire dashboard tab — avoids
+            // each chart/table independently flashing its own "No data"
+            // empty state while the full analytics response set
+            // (analyticsResponsesLoading) is still in flight. Skipped
+            // during PDF export (isExporting), since that render happens
+            // off-screen after data has already loaded and must contain
+            // real content, not a spinner.
+            <div className="flex items-center justify-center min-h-[400px]">
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent mx-auto mb-4"></div>
+                <p className="text-gray-500 dark:text-gray-400 font-medium">
+                  Loading dashboard data...
+                </p>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="w-full" id="summary-cards">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 w-full">
+                  {/* Response Trend Chart - COMPACT */}
+                  {/* Response Trend Chart */}
+                  <div className="p-6 bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 flex flex-col rounded-xl border border-gray-200 dark:border-gray-700 shadow-lg hover:shadow-xl transition-shadow w-full">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center">
+                        <div className="p-2 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-lg mr-2">
+                          <BarChart3 className="w-4 h-4 text-white" />
+                        </div>
+                        <div>
+                          <h3 className="text-md font-bold text-primary-900 dark:text-white">
+                            Response Trend
+                          </h3>
+                          <p className="text-xs text-primary-500 dark:text-primary-400">
+                            Last 30 days
+                          </p>
+                        </div>
                       </div>
-                      <p className="text-sm text-primary-500 dark:text-primary-400 font-medium">
-                        No responses yet
-                      </p>
                     </div>
+
+                    {Object.keys(analytics.responseTrend).length === 0 ? (
+                      <div className="flex-1 flex items-center justify-center min-h-[280px]">
+                        <div className="text-center">
+                          <div className="mb-2">
+                            <BarChart3 className="w-8 h-8 text-gray-300 dark:text-gray-600 mx-auto" />
+                          </div>
+                          <p className="text-sm text-primary-500 dark:text-primary-400 font-medium">
+                            No responses yet
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex-1 flex flex-col w-full">
+                        <div
+                          style={{ height: "293px", width: "100%", position: "relative" }} // ✅ Added width: 100%
+                          id="response-trend-chart"
+                        >
+                          <Line
+                            data={{
+                              labels: analytics.dateRange.map((date) =>
+                                new Date(date).toLocaleDateString("en-US", {
+                                  month: "short",
+                                  day: "numeric",
+                                }),
+                              ),
+                              datasets: [
+                                {
+                                  label: "Responses %",
+                                  data: analytics.percentageData,
+                                  borderColor: "rgb(59, 130, 246)",
+                                  backgroundColor: "rgba(59, 130, 246, 0.1)",
+                                  fill: true,
+                                  tension: 0.4,
+                                  pointRadius: 4,
+                                  pointHoverRadius: 6,
+                                  pointBackgroundColor: "rgb(59, 130, 246)",
+                                  pointBorderColor: "#fff",
+                                  pointBorderWidth: 2,
+                                  borderWidth: 2,
+                                },
+                              ],
+                            }}
+                            options={{
+                              responsive: true,
+                              maintainAspectRatio: false,
+                              // ✅ Add these to ensure full width
+                              devicePixelRatio: 2,
+                              interaction: {
+                                mode: "index" as const,
+                                axis: "x" as const,
+                                intersect: false,
+                              },
+                              plugins: {
+                                legend: {
+                                  display: false,
+                                },
+                                tooltip: {
+                                  backgroundColor: "rgba(0, 0, 0, 0.8)",
+                                  titleColor: "#fff",
+                                  bodyColor: "#fff",
+                                  cornerRadius: 6,
+                                  padding: 10,
+                                  titleFont: { size: 11, weight: "bold" },
+                                  bodyFont: { size: 11 },
+                                  callbacks: {
+                                    title: (context: any) => {
+                                      const index = context[0].dataIndex;
+                                      const date = analytics.dateRange[index];
+                                      if (!date) return "";
+                                      const [y, m, d] = date.split("-").map(Number);
+                                      return new Date(y, m - 1, d).toLocaleDateString("en-US", {
+                                        month: "short",
+                                        day: "numeric",
+                                        year: "numeric",
+                                      });
+                                    },
+                                    label: function (context) {
+                                      return `Responses: ${context.parsed.y}`;
+                                    },
+                                  },
+                                },
+                              },
+                              scales: {
+                                y: {
+                                  beginAtZero: true,
+                                  max: 100,
+                                  grid: {
+                                    color: "rgba(0, 0, 0, 0.05)",
+                                    drawBorder: false,
+                                  },
+                                  ticks: {
+                                    color: "rgb(107, 114, 128)",
+                                    font: { size: 10 },
+                                    callback: function (value) {
+                                      return value + "%";
+                                    },
+                                  },
+                                },
+                                x: {
+                                  grid: {
+                                    display: false,
+                                    drawBorder: false,
+                                  },
+                                  ticks: {
+                                    color: "rgb(107, 114, 128)",
+                                    font: { size: 10 },
+                                    maxRotation: 45,
+                                    minRotation: 0,
+                                    autoSkip: true,
+                                    maxTicksLimit: 15,
+                                  },
+                                },
+                              },
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
-                ) : (
-                  <div className="flex-1 flex flex-col">
-                    <div
-                      style={{ height: "293px", position: "relative" }}
-                      id="response-trend-chart"
-                    >
-                      <Line
-                        data={{
-                          labels: analytics.last7Days.map((date) =>
-                            new Date(date).toLocaleDateString("en-US", {
-                              month: "short",
-                              day: "numeric",
-                            }),
-                          ),
-                          datasets: [
-                            {
-                              label: "Responses %",
-                              data: analytics.percentageData,
-                              borderColor: "rgb(59, 130, 246)",
-                              backgroundColor: "rgba(59, 130, 246, 0.1)",
-                              fill: true,
-                              tension: 0.4,
-                              pointRadius: 4,
-                              pointHoverRadius: 6,
-                              pointBackgroundColor: "rgb(59, 130, 246)",
-                              pointBorderColor: "#fff",
-                              pointBorderWidth: 2,
-                              borderWidth: 2,
-                            },
-                          ],
-                        }}
-                        options={{
-                          responsive: true,
-                          maintainAspectRatio: false,
-                          interaction: {
-                            mode: "index" as const,
-                            axis: "x" as const,
-                            intersect: false,
-                          },
-                          plugins: {
-                            legend: {
-                              display: false,
-                            },
-                            tooltip: {
-                              backgroundColor: "rgba(0, 0, 0, 0.8)",
-                              titleColor: "#fff",
-                              bodyColor: "#fff",
-                              cornerRadius: 6,
-                              padding: 10,
-                              titleFont: { size: 11, weight: "bold" },
-                              bodyFont: { size: 11 },
-                              callbacks: {
-                                title: (context: any) => {
-                                  const index = context[0].dataIndex;
-                                  const date = analytics.last7Days[index];
-                                  if (!date) return "";
-                                  const [y, m, d] = date.split("-").map(Number);
-                                  return new Date(
-                                    y,
-                                    m - 1,
-                                    d,
-                                  ).toLocaleDateString("en-US", {
-                                    month: "short",
-                                    day: "numeric",
-                                    year: "numeric",
-                                  });
-                                },
-                                label: function (context) {
-                                  return `Responses: ${context.parsed.y}`;
-                                },
-                              },
-                            },
-                          },
-                          scales: {
-                            y: {
-                              beginAtZero: true,
-                              max: 100,
-                              grid: {
-                                color: "rgba(0, 0, 0, 0.05)",
-                                drawBorder: false,
-                              },
-                              ticks: {
-                                color: "rgb(107, 114, 128)",
-                                font: { size: 10 },
-                                callback: function (value) {
-                                  return value + "%";
-                                },
-                              },
-                            },
-                            x: {
-                              grid: {
-                                display: false,
-                                drawBorder: false,
-                              },
-                              ticks: {
-                                color: "rgb(107, 114, 128)",
-                                font: { size: 10 },
-                              },
-                            },
-                          },
-                        }}
-                      />
+
+                  {/* Pie Chart - COMPACT */}
+                  <OverallQualityPieChart />
+                </div>
+              </div>
+
+              {/* Question Distribution Chart */}
+              {(questionPerformanceStats.length > 0 ||
+                trendChartResponses.length > 0) && (
+                  <div className="w-full" id="question-distribution-card">
+                    <div className="w-full space-y-6">
+                      <InspectionStatusLineChart />
+                      <QuestionStatusDistributionChart />
+                      <TimeBasedPerformanceGraph />
+                      <DirectAcceptedPerformanceGraph />
+                      {renderSummaryTable()}
+                      {renderPerformanceTable()}
+                      {renderBiwReviewTable()}
+                      <InspectorPerformanceChart />
                     </div>
                   </div>
                 )}
-              </div>
-
-              {/* Pie Chart - COMPACT */}
-              <OverallQualityPieChart />
-            </div>
-          </div>
-
-          {/* Question Distribution Chart */}
-          {(questionPerformanceStats.length > 0 ||
-            trendChartResponses.length > 0) && (
-              <div className="w-full" id="question-distribution-card">
-                <div className="w-full space-y-6">
-                  <InspectionStatusLineChart />
-                  <QuestionStatusDistributionChart />
-                  <TimeBasedPerformanceGraph />
-                  <DirectAcceptedPerformanceGraph />
-                  {renderSummaryTable()}
-                  {renderPerformanceTable()}
-                  {renderBiwReviewTable()}
-                  <InspectorPerformanceChart />
-                </div>
-              </div>
-            )}
+            </>
+          )}
         </div>
       )}
 
@@ -10343,7 +10524,9 @@ export default function FormAnalyticsDashboard() {
                                         const validResponseIds: string[] = [];
                                         let selfSubmissionsCount = 0;
                                         selectedBiwIds.forEach((id) => {
-                                          const resp = responses.find((r) => r.id === id);
+                                          const resp =
+                                            responses.find((r) => r.id === id) ||
+                                            tableResponses.find((r) => r.id === id);
                                           if (resp) {
                                             if (status !== null && isSubmitterOfResponse(resp)) {
                                               selfSubmissionsCount++;
@@ -12715,8 +12898,14 @@ export default function FormAnalyticsDashboard() {
                                           <QuestionSuggestionRenderer
                                             question={q}
                                             currentAnswer={
-                                              responses.find(
-                                                (r) => r.id === chatResponse.id,
+                                              (
+                                                responses.find(
+                                                  (r) => r.id === chatResponse.id,
+                                                ) ||
+                                                tableResponses.find(
+                                                  (r) => r.id === chatResponse.id,
+                                                ) ||
+                                                chatResponse
                                               )?.answers?.[q.id]
                                             }
                                             value={

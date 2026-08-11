@@ -12,11 +12,39 @@ const API_BASE_URL = (() => {
     hostname.includes("netlify.app") ||
     hostname.includes("netlify.live");
 
-  const baseUrl = isLocal
-    ? "http://127.0.0.1:5000/api"
-    : isStaging
-      ? "https://threew-wheeler-backend.onrender.com/api"
-      : "https://3wheelertvsbackend.focusengineeringapp.com/api";
+  // api/client.ts
+
+  const getBaseUrl = (): string => {
+    const hostname = window.location.hostname;
+
+    // Development/Local
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return "http://127.0.0.1:5000/api";
+    }
+
+    // AWS Deployment
+    if (hostname === '3wheelertvs.focusengineeringapp.com') {
+      return "https://3wheelertvsbackend.focusengineeringapp.com/api";
+    }
+
+    // Hostinger VPS Deployment
+    if (hostname === '3wtvs.focusengineeringapp.com' || hostname.includes('3wtvs')) {
+      return "https://3wbackend.focusengineeringapp.com/api"; // Adjust this URL
+    }
+
+    // Staging/Render
+    if (hostname.includes('staging') || hostname.includes('render')) {
+      return "https://threew-wheeler-backend.onrender.com/api";
+    }
+
+    // Fallback - Production
+    return "https://3wheelertvsbackend.focusengineeringapp.com/api";
+  };
+
+  const baseUrl = getBaseUrl();
+
+  console.log(`[API] Detected hostname: ${hostname}`);
+  console.log(`[API] Using backend URL: ${baseUrl}`);
 
   console.log(
     `🔗 API Base URL: ${baseUrl} (Environment: ${isLocal ? "Local" : isStaging ? "Staging" : "Production"

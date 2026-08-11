@@ -2680,6 +2680,13 @@ export default function FormAnalyticsDashboard() {
         ),
       );
 
+      // Also update tableResponses so the table UI reflects the change immediately
+      setTableResponses((prev) =>
+        prev.map((r) =>
+          r.id === response.id ? { ...r, biwReview: savedBiwReview } : r,
+        ),
+      );
+
 
       showToast(
         isUnselecting
@@ -2705,22 +2712,25 @@ export default function FormAnalyticsDashboard() {
       const result = await apiClient.bulkUpdateBiwReview(biwBulkUpdateTargetIds, biwBulkUpdateStatus);
 
       // Update local state
-      setResponses((prev) =>
-        prev.map((r) => {
-          if (biwBulkUpdateTargetIds.includes(r.id)) {
-            return {
-              ...r,
-              biwReview: biwBulkUpdateStatus === null ? undefined : {
-                status: biwBulkUpdateStatus,
-                reviewedBy: user?._id || user?.id,
-                reviewedByName: user?.username || user?.email || 'Reviewer',
-                reviewedAt: new Date().toISOString()
-              }
-            };
-          }
-          return r;
-        })
-      );
+      const biwReviewUpdate = (r: Response) => {
+        if (biwBulkUpdateTargetIds.includes(r.id)) {
+          return {
+            ...r,
+            biwReview: biwBulkUpdateStatus === null ? undefined : {
+              status: biwBulkUpdateStatus,
+              reviewedBy: user?._id || user?.id,
+              reviewedByName: user?.username || user?.email || 'Reviewer',
+              reviewedAt: new Date().toISOString()
+            }
+          };
+        }
+        return r;
+      };
+
+      setResponses((prev) => prev.map(biwReviewUpdate));
+
+      // Also update tableResponses so the table UI reflects the change immediately
+      setTableResponses((prev) => prev.map(biwReviewUpdate));
 
 
       setSelectedResponseIds([]);
@@ -10504,29 +10514,46 @@ export default function FormAnalyticsDashboard() {
                                       checked={tableResponses.length > 0 && selectedBiwIds.length === tableResponses.length}
                                       disabled={tableResponses.length === 0 || isBulkBiwUpdating}
                                       onChange={(e) => {
-                                        if (e.target.checked) setSelectedBiwIds(tableResponses.map(r => r.id));
-                                        else setSelectedBiwIds([]);
+                                        e.stopPropagation();
+                                        console.log('[BIW] Header select all clicked:', e.target.checked);
+
+                                        if (e.target.checked) {
+                                          const allIds = tableResponses.map(r => r.id);
+                                          console.log('[BIW] Selecting all:', allIds.length, 'items');
+                                          setSelectedBiwIds(allIds);
+                                        } else {
+                                          console.log('[BIW] Clearing all selections');
+                                          setSelectedBiwIds([]);
+                                        }
                                       }}
                                       className="w-3.5 h-3.5 text-purple-600 border-gray-300 dark:border-gray-600 rounded cursor-pointer accent-purple-600"
                                     />
                                     <span>Select All</span>
+                                    {selectedBiwIds.length > 0 && (
+                                      <span className="text-[9px] font-bold text-purple-600 bg-purple-100 dark:bg-purple-900/30 px-1.5 py-0.5 rounded ml-1">
+                                        {selectedBiwIds.length}
+                                      </span>
+                                    )}
                                   </label>
                                 )}
+
+                                {/* Bulk actions dropdown */}
                                 <select
                                   onChange={(e) => {
                                     const val = e.target.value;
                                     if (val) {
                                       const status = val === "Clear" ? null : val as "Accepted" | "Rejected" | "Reworked";
+
+                                      console.log('[BIW] Bulk action:', status, 'for', selectedBiwIds.length, 'items');
+
                                       if (selectedBiwIds.length === 0) {
-                                        showToast("Please select items using checkboxes first", "error");
+                                        showToast("Please select items using the BIW checkboxes first", "error");
                                       } else {
-                                        // Reuse existing logic, but for selectedBiwIds
                                         const validResponseIds: string[] = [];
                                         let selfSubmissionsCount = 0;
+
                                         selectedBiwIds.forEach((id) => {
-                                          const resp =
-                                            responses.find((r) => r.id === id) ||
-                                            tableResponses.find((r) => r.id === id);
+                                          const resp = responses.find((r) => r.id === id) || tableResponses.find((r) => r.id === id);
                                           if (resp) {
                                             if (status !== null && isSubmitterOfResponse(resp)) {
                                               selfSubmissionsCount++;
@@ -10535,6 +10562,7 @@ export default function FormAnalyticsDashboard() {
                                             }
                                           }
                                         });
+
                                         if (validResponseIds.length === 0) {
                                           showToast("You cannot BIW review your own submissions. All selected items were skipped.", "error");
                                         } else {
@@ -10548,13 +10576,13 @@ export default function FormAnalyticsDashboard() {
                                     }
                                   }}
                                   disabled={isBulkBiwUpdating || tableResponses.length === 0}
-                                  className="px-2 py-1 text-[10px] font-black border border-purple-200 dark:border-purple-700 rounded bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 focus:outline-none normal-case tracking-normal cursor-pointer shadow-sm hover:border-purple-400 transition-colors"
+                                  className="px-2 py-1 text-[10px] font-black border border-purple-200 dark:border-purple-700 rounded bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 focus:outline-none normal-case tracking-normal cursor-pointer shadow-sm hover:border-purple-400 transition-colors w-full"
                                 >
                                   <option value="">Apply to Selected...</option>
-                                  <option value="Accepted">Accept Selected</option>
-                                  <option value="Rejected">Reject Selected</option>
-                                  <option value="Reworked">Rework Selected</option>
-                                  <option value="Clear">Clear Selected</option>
+                                  <option value="Accepted">✓ Accept Selected</option>
+                                  <option value="Rejected">✗ Reject Selected</option>
+                                  <option value="Reworked">⟳ Rework Selected</option>
+                                  <option value="Clear">✕ Clear Selected</option>
                                 </select>
                               </div>
                             </th>
@@ -11009,20 +11037,16 @@ export default function FormAnalyticsDashboard() {
                                       );
                                     })()}
                                   </td>
+                                  {/* BIW Review Column - Complete Fixed Version */}
                                   <td className="px-4 py-3 border border-gray-200 dark:border-gray-700 min-w-40 bg-purple-50/50 dark:bg-purple-900/10">
                                     {(() => {
-                                      const isSubmitter =
-                                        isSubmitterOfResponse(response);
-                                      const currentStatus =
-                                        response.biwReview?.status;
-                                      const isSaving =
-                                        biwSavingResponseId === response.id;
+                                      const isSubmitter = isSubmitterOfResponse(response);
+                                      const currentStatus = response.biwReview?.status;
+                                      const isSaving = biwSavingResponseId === response.id;
 
-                                      const options: {
-                                        status:
-                                        | "Accepted"
-                                        | "Rejected"
-                                        | "Reworked";
+                                      // 🔥 FIX: Define options here - this is the missing piece!
+                                      const biwOptions: {
+                                        status: "Accepted" | "Rejected" | "Reworked";
                                         label: string;
                                         icon: any;
                                         activeClass: string;
@@ -11031,52 +11055,62 @@ export default function FormAnalyticsDashboard() {
                                             status: "Accepted",
                                             label: "Accept",
                                             icon: CheckCircle,
-                                            activeClass:
-                                              "text-green-600 dark:text-green-400",
+                                            activeClass: "text-green-600 dark:text-green-400",
                                           },
                                           {
                                             status: "Rejected",
                                             label: "Reject",
                                             icon: XCircle,
-                                            activeClass:
-                                              "text-red-600 dark:text-red-400",
+                                            activeClass: "text-red-600 dark:text-red-400",
                                           },
                                           {
                                             status: "Reworked",
                                             label: "Rework",
                                             icon: RotateCcw,
-                                            activeClass:
-                                              "text-orange-600 dark:text-orange-400",
+                                            activeClass: "text-orange-600 dark:text-orange-400",
                                           },
                                         ];
 
+                                      // Get checked state
+                                      const isChecked = selectedBiwIds.includes(response.id);
+                                      const rowKey = `biw-${response.id}-${isChecked ? 'selected' : 'unselected'}`;
+
                                       return (
-                                        <div className="flex flex-col gap-1.5">
+                                        <div className="flex flex-col gap-1.5" key={rowKey}>
+                                          {/* Selection checkbox */}
                                           <div className="flex items-center gap-2 mb-1 border-b border-gray-200 dark:border-gray-700 pb-1">
                                             <input
                                               type="checkbox"
-                                              checked={selectedBiwIds.includes(response.id)}
+                                              checked={isChecked}
                                               onChange={(e) => {
-                                                if (e.target.checked) setSelectedBiwIds(prev => [...prev, response.id]);
-                                                else setSelectedBiwIds(prev => prev.filter(id => id !== response.id));
+                                                e.stopPropagation();
+                                                e.preventDefault();
+
+                                                if (e.target.checked) {
+                                                  setSelectedBiwIds(prev => [...prev, response.id]);
+                                                } else {
+                                                  setSelectedBiwIds(prev => prev.filter(id => id !== response.id));
+                                                }
                                               }}
                                               className="w-3.5 h-3.5 text-purple-600 border-gray-300 dark:border-gray-600 rounded cursor-pointer accent-purple-600"
                                               title="Select for bulk review"
                                             />
                                             <span className="text-[10px] text-gray-500 font-semibold uppercase">Select</span>
+                                            {isChecked && (
+                                              <span className="ml-auto text-[9px] font-bold text-purple-600 bg-purple-100 dark:bg-purple-900/30 px-1.5 py-0.5 rounded">
+                                                ✓
+                                              </span>
+                                            )}
                                           </div>
-                                          {options.map((opt) => {
+
+                                          {/* BIW Review Status Options */}
+                                          {biwOptions.map((opt) => {
                                             const Icon = opt.icon;
-                                            const checked =
-                                              currentStatus === opt.status;
+                                            const checked = currentStatus === opt.status;
                                             return (
                                               <label
                                                 key={opt.status}
-                                                title={
-                                                  isSubmitter
-                                                    ? "You cannot BIW review your own submission"
-                                                    : opt.label
-                                                }
+                                                title={isSubmitter ? "You cannot BIW review your own submission" : opt.label}
                                                 className={`flex items-center gap-1.5 text-xs font-medium ${isSubmitter
                                                   ? "opacity-40 cursor-not-allowed"
                                                   : "cursor-pointer"
@@ -11085,15 +11119,11 @@ export default function FormAnalyticsDashboard() {
                                                 <input
                                                   type="checkbox"
                                                   checked={checked}
-                                                  disabled={
-                                                    isSubmitter || isSaving
-                                                  }
-                                                  onChange={() =>
-                                                    handleBiwReviewChange(
-                                                      response,
-                                                      opt.status,
-                                                    )
-                                                  }
+                                                  disabled={isSubmitter || isSaving}
+                                                  onChange={() => {
+                                                    console.log(`[BIW] Status change for ${response.id}: ${opt.status}`);
+                                                    handleBiwReviewChange(response, opt.status);
+                                                  }}
                                                   className="w-3.5 h-3.5 rounded cursor-pointer accent-current disabled:cursor-not-allowed"
                                                 />
                                                 <Icon className="w-3.5 h-3.5" />
@@ -11101,6 +11131,7 @@ export default function FormAnalyticsDashboard() {
                                               </label>
                                             );
                                           })}
+
                                           {isSaving && (
                                             <span className="flex items-center gap-1 text-[10px] text-gray-400">
                                               <Loader2 className="w-3 h-3 animate-spin" />
